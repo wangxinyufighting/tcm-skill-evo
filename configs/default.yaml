@@ -1,0 +1,146 @@
+# ============================================================================
+# 默认配置。所有键都可以用命令行覆盖：--set skills.verify=false --set llm.workers=8
+# 方法预设（基线 / 本方法 / 消融）见 configs/methods.yaml
+# ============================================================================
+paths:
+  ptm_dir: data/raw/PTM/data       # scripts/download_ptm.sh 克隆到这里
+  processed_dir: data/processed
+  kb_dir: kb
+  runs_dir: runs
+
+data:
+  gt_mode: fmm_alias      # fmm_alias（默认，最干净）| fmm（只修子串伪影）| ptm（PTM 原始集合，便于和文献对比）
+  merge_processed: true   # 炮制品并入基原药（炙甘草→甘草、法半夏→半夏 …）
+  input_mode: description # description（清洗后的主治描述，默认）| keywords（PTM 症状关键词）| both
+  val_size: 1000
+  n_categories: 20        # 类别 κ 的个数（KMeans）
+  seed: 42
+
+llm:
+  provider: deepseek      # deepseek | openai_compatible | mock（不调 API 的模拟后端，用于冒烟测试与成本估计）
+  model: deepseek/deepseek-v4.1-flash   # 2026-11：deepseek-flash（V4.1-Flash）/ deepseek-v4-pro；deepseek-chat/reasoner 已于 2026-07-24 下线
+  base_url: https://api.commandcode.ai/provider/v1
+  api_key_env: DEEPSEEK_API_KEY
+  thinking: true        # true 开启思考模式（按输出计费，贵很多）
+  reasoning_effort: high  # 思考模式强度 low | high | max
+  thinking_max_tokens: 16000  # 思考模式下的输出上限（思考内容也占输出额度）
+  temperature: 0.0        # 非思考模式下生效
+  max_tokens: 4096        # 所有方法/任务共用；思考时取 max(本值, thinking_max_tokens)
+  json_mode: true         # response_format = json_object
+  json_repair_retries: 1  # 非完整 JSON / 截断后，最多额外生成一次；沿用同一预算
+  accept_repaired_json: false # 不把语法修复的残片作为成功答案或技能写入
+  timeout: 180
+  max_retries: 6
+  workers: 4              # 并发请求数；先确认连接稳定，再逐步提高
+  cache_path: runs/llm_cache.sqlite   # 相同请求只付一次钱；重跑 / 断点续跑都走缓存
+  log_calls: true
+  # 美元 / 百万 token。请以 https://api-docs.deepseek.com/quick_start/pricing 为准（2026-08 起有峰谷价，谷时半价）
+  prices:
+    deepseek-flash: {hit: 0.006, miss: 0.30, out: 1.20}
+    deepseek-v4-pro: {hit: 0.044, miss: 1.32, out: 3.96}
+    default: {hit: 0.03, miss: 0.30, out: 1.20}
+
+prescribe:
+  style: structured       # structured（辨证→治法→处方，带来源标注）| direct（只给药名）
+  include_vocab: true     # 把药名词表放进 system prompt（静态前缀，命中缓存后几乎免费）
+  vocab_min_freq: 1
+  max_herbs: 30
+  n_cases: 5              # 病例检索类方法每次给几个相似医案
+
+safety:
+  mode: report            # report：只统计违规 | filter：自动删除违规对中排序靠后的药
+
+stream:
+  window: 50              # 每个学习窗口的病例数（同一窗口共享同一份技能库快照）
+  order: random           # random | category（按类别分块，用于遗忘实验）
+  val_every: 0            # >0 时每隔多少个窗口在验证子集上做一次冻结评测
+  val_size: 300
+  checkpoint_every: 1
+
+skills:
+  structured: true        # false = 自由文本技能（SkeMex 式）
+  credit: herb            # herb（药物级归因）| episode（整例得分，SkeMex 式）
+  verify: true            # 统计检验（LLM 提假设、数据做检验）
+  induction: multi        # multi（多案对比归纳）| single（单案写入）
+  attempt_first: true     # false = 不先开方、只看 GT 归纳（hindsight-only 消融）
+  rules_from_reflection: true   # 把反思里"漏开药 + 提示词"直接做成候选加减规则（零 LLM 成本）
+  hybrid_cases: 0         # >0 时在技能之外再给 k 个相似医案（技能 + 病例 混合）
+  govern_every: 4         # 每隔几个窗口治理一次；0 = 不治理
+  merge: true
+  split: true
+  init_utility: 0.5
+  retrieval:
+    k_formula: 3
+    k_modification: 6
+    k_principle: 3
+    k_free: 6             # 自由文本技能的 top-K
+    min_score: 0.34       # 结构化触发匹配分低于此值不检索
+    w_sim: 0.5
+    w_util: 0.4
+    w_strength: 0.1
+    mature_bonus: 0.05
+  match:
+    opt_weight: 0.3       # 或见症的权重
+    exclude_penalty: 0.7  # 出现"不宜"症状时的惩罚
+    fire: 0.5             # 符号执行 / 统计检验时视为"触发"的最低匹配分
+    mod_if_ratio: 1.0     # 加减规则的条件词需要命中的比例
+  gate:
+    max_per_window: 30
+    success_f1: 0.8
+    success_keep: 0.2
+    alpha: 1.0
+    beta: 0.5
+  cluster:
+    herb_jaccard: 0.4
+    k_min: 3
+    k_max: 8
+    hist_neighbors: 5
+    pending_windows: 4
+    max_clusters_per_window: 10
+  verify_thr:
+    formula_min_match: 3
+    formula_min_prec: 0.35
+    formula_min_lift: 1.5
+    mod_min_support: 2
+    mod_min_lift: 1.2
+    rule_min_support: 3
+    rule_min_lift: 2.0
+    rule_min_conf: 0.1
+    min_term_len: 2
+    holdout_source: false # true = 只用"不是归纳来源"的病例做检验（更严格、样本外）；无论开关，样本外精度都会记在 vstats 里
+  utility:
+    eta_min: 0.05
+    eta_max: 0.2
+    warmup: 10
+    harm: 0.5
+    miss_gain: 0.5
+    miss_delta: 0.2
+    baseline_ema: 0.05
+    principle_scale: 0.5
+  govern:
+    dep_min_used: 6
+    dep_util: 0.25
+    dep_min_ret_unused: 40
+    promote_min_used: 10
+    promote_util: 0.65
+    merge_core_jacc: 0.7
+    merge_trig_jacc: 0.4
+    merge_text_sim: 0.85
+    split_min_used: 12
+    split_gap: 0.3
+    split_min_group: 4
+    remove_after_windows: 8
+    cap: {formula: 600, modification: 1200, principle: 40, free: 800}
+
+case_rag:
+  memory_scope: seen      # seen（与本方法相同：只用建库时见过的病例）| all_train（全部训练集，此时用 --phase test 直接测）
+
+baselines_mem:
+  reflexion_k: 4
+  expel_max_insights: 40
+  expel_k_success: 3
+  dc_max_chars: 2500
+
+knn:
+  k: 20
+  feature: description    # description | keywords

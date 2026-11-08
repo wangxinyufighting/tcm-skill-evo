@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/raw/
+data/processed*/
+data/sft*/
+runs/
+figures/
+review/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+data/
+runs/

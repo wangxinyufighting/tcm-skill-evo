@@ -1,0 +1,90 @@
+# 方法预设：type 决定用哪个类，其余键覆盖 default.yaml
+# 用法：python scripts/run_method.py --method ours ...
+
+# ----------------------------------------------------------------- 无记忆 LLM 基线
+zeroshot:
+  type: zeroshot
+  description: 零样本，直接给药名
+  prescribe: {style: direct}
+
+zeroshot_cot:
+  type: zeroshot
+  description: 零样本，先辨证治法再开方（与本方法同一输出格式）
+  prescribe: {style: structured}
+
+# ----------------------------------------------------------------- 检索 / 记忆型基线
+case_rag:
+  type: case_rag
+  description: 相似医案 few-shot（离线 = 全部训练集；在线 = 已见病例）
+  prescribe: {style: structured}
+
+reflexion:
+  type: reflexion
+  description: Reflexion 式：逐例反思写成经验，按相似度检索"相似医案 + 经验"
+  prescribe: {style: structured}
+
+expel:
+  type: expel
+  description: ExpeL 式：全局经验条目（增/改/投票/删）+ 成功医案检索
+  prescribe: {style: structured}
+
+dc:
+  type: dc
+  description: Dynamic Cheatsheet 式：一份不断改写的开方备忘录
+  prescribe: {style: structured}
+
+skemex_like:
+  type: skills
+  description: SkeMex 式复现：三分支自由文本技能、整例效用、无统计检验、无拆分
+  skills: {structured: false, credit: episode, verify: false, induction: single, split: false, rules_from_reflection: false}
+
+# ----------------------------------------------------------------- 本方法
+ours:
+  type: skills
+  description: 理法方药结构化技能 + 药物级效用 + 多案对比归纳 + 统计检验 + 治理（合并/拆分）
+
+ours_hybrid:
+  type: skills
+  description: 本方法 + 相似医案（技能 + 病例 混合）
+  skills: {hybrid_cases: 3}
+
+# ----------------------------------------------------------------- 消融
+abl_freetext:
+  type: skills
+  description: 去掉结构化（自由文本技能，其余同本方法）
+  skills: {structured: false, verify: false, rules_from_reflection: false}
+
+abl_episode_credit:
+  type: skills
+  description: 药物级效用 → 整例效用
+  skills: {credit: episode}
+
+abl_no_verify:
+  type: skills
+  description: 去掉统计检验
+  skills: {verify: false}
+
+abl_single_case:
+  type: skills
+  description: 多案对比归纳 → 单案写入
+  skills: {induction: single}
+
+abl_no_rules:
+  type: skills
+  description: 去掉"反思→规则"通道
+  skills: {rules_from_reflection: false}
+
+abl_no_govern:
+  type: skills
+  description: 去掉治理（合并/拆分/淘汰）
+  skills: {govern_every: 0}
+
+abl_no_split:
+  type: skills
+  description: 去掉拆分（同病异治）
+  skills: {split: false}
+
+abl_hindsight:
+  type: skills
+  description: 不先开方，只看 GT 归纳（检验"先试后看"是否有用）
+  skills: {attempt_first: false}
