@@ -112,7 +112,12 @@ class Skill:
                 f"若{'、'.join(m.get('if', []))}" + (f"加{'、'.join(m['add'])}" if m.get("add") else "") + (f"去{'、'.join(m['remove'])}" if m.get("remove") else "")
                 for m in self.mods[:max_mods]
             )
-            s = f"[{self.id}] 方证「{truncate(self.name, 20)}」｜适用：{trig}｜病机：{truncate(self.pathogenesis, 30)}｜治法：{truncate(self.principle, 20)}｜基础方：{core}"
+            s = f"[{self.id}] 方证「{truncate(self.name, 20)}」｜适用：{trig}"
+            if self.pathogenesis:
+                s += f"｜病机：{truncate(self.pathogenesis, 30)}"
+            if self.principle:
+                s += f"｜治法：{truncate(self.principle, 20)}"
+            s += f"｜基础方：{core}"
             if mods:
                 s += f"｜加减：{mods}"
             if self.note:

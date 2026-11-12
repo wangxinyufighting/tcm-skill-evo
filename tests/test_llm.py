@@ -11,7 +11,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from tcmskill.config import load_config  # noqa: E402
-from tcmskill.llm import DeepSeekLLM, LLMHTTPError  # noqa: E402
+from tcmskill.llm import DeepSeekLLM, LLMHTTPError, LLMOutputBudgetError  # noqa: E402
 
 openai = pytest.importorskip("openai")
 # OpenAI 3.x uses HTTPX2; older supported SDKs use HTTPX.
@@ -66,6 +66,7 @@ def make_llm(monkeypatch, tmp_path):
             f"llm.cache_path={tmp_path / 'cache.sqlite'}",
             "llm.max_retries=1",
             "llm.thinking=false",
+            "llm.thinking_max_tokens=16000",
             "llm.json_mode=true",
         ])
         llm = DeepSeekLLM(cfg)
@@ -183,7 +184,7 @@ def test_exhausted_requests_keep_root_cause_and_do_not_sleep_after_last_attempt(
     assert llm.cache.get(result.request_key) is None
 
 
-@pytest.mark.parametrize("failure", ["connection", "http429"])
+@pytest.mark.parametrize("failure", ["connection", "http429", "http502", "empty502"])
 def test_recovered_transport_retry_is_preserved_in_cache(make_llm, monkeypatch, failure):
     requests = []
 
@@ -192,7 +193,9 @@ def test_recovered_transport_retry_is_preserved_in_cache(make_llm, monkeypatch, 
         if len(requests) == 1:
             if failure == "connection":
                 raise httpx.ConnectError("test reset", request=request)
-            return httpx.Response(429, json={"error": "test rate limit"})
+            status = 429 if failure == "http429" else 502
+            message = "empty reply" if failure == "empty502" else "test temporary failure"
+            return httpx.Response(status, json={"error": message})
         return httpx.Response(200, json=_completion())
 
     monkeypatch.setattr("tcmskill.llm.time.sleep", lambda delay: None)
@@ -207,6 +210,39 @@ def test_recovered_transport_retry_is_preserved_in_cache(make_llm, monkeypatch, 
     assert len(requests) == 2
     if failure == "http429":
         assert attempts[0]["http_status"] == 429
+
+
+@pytest.mark.parametrize("thinking,requested,effective", [(False, 8192, 8192), (True, 8192, 16000), (True, 64000, 64000)])
+def test_reasoning_only_502_fails_fast_with_actual_budget_and_diagnostics(make_llm, monkeypatch, tmp_path, thinking, requested, effective):
+    requests, sleeps = [], []
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(502, json={"error": {"message":
+            "WorkBuddy AI: an empty reply (the model answered nothing; try again) - cut at its length, the whole output spent on reasoning"}})
+    monkeypatch.setattr("tcmskill.llm.time.sleep", sleeps.append)
+    llm = make_llm(handle)
+    llm.thinking = thinking
+    llm.max_retries = 6
+    llm.call_log_path = str(tmp_path / "budget_failure.jsonl")
+    with pytest.raises(LLMOutputBudgetError, match=f"max_tokens={effective}"):
+        llm.chat_json([{"role": "user", "content": "Return JSON."}], "knowledge_rx", max_tokens=requested)
+    assert len(requests) == 1 and sleeps == []
+    assert requests[0]["max_tokens"] == effective
+    row = json.loads((tmp_path / "budget_failure.jsonl").read_text())
+    assert row["request_failed"] and not row["ok"]
+    assert len(row["attempts"]) == 1 and row["attempts"][0]["truncated"]
+    transport = row["attempts"][0]["transport_attempts"][0]
+    assert transport["http_status"] == 502 and transport["max_tokens"] == effective
+    assert transport["failure_kind"] == "reasoning_budget_exhausted"
+    assert llm.cache.get(row["request_key"]) is None
+
+
+def test_compatible_thinking_false_does_not_send_a_server_disable_parameter(make_llm):
+    llm = make_llm(lambda request: httpx.Response(200, json=_completion()))
+    llm.send_thinking = False
+    std, extra = llm._payload([], 64000)
+    assert std["max_tokens"] == 64000
+    assert "thinking" not in extra and "reasoning_effort" not in extra
 
 
 def test_transport_history_is_thread_local(make_llm, monkeypatch):

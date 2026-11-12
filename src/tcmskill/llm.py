@@ -120,7 +120,10 @@ class UsageTracker:
 
     def add(self, task: str, usage: dict | None, cached: bool, error: bool, model: str = "") -> None:
         usage = usage or {}
-        hit = int(usage.get("prompt_cache_hit_tokens", 0) or 0)
+        hit = usage.get("prompt_cache_hit_tokens")
+        if hit is None:  # OpenAI-style providers report cached prompt tokens here
+            hit = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        hit = int(hit or 0)
         miss = int(usage.get("prompt_cache_miss_tokens", usage.get("prompt_tokens", 0) - hit) or 0)
         out = int(usage.get("completion_tokens", 0) or 0)
         reas = int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0)
@@ -293,6 +296,19 @@ class FatalLLMError(RuntimeError):
     """Errors that make every further call pointless (bad key, no balance, unknown model)."""
 
 
+class LLMOutputBudgetError(FatalLLMError):
+    """The provider explicitly exhausted the output budget before producing an answer."""
+
+
+def _budget_error(max_tokens: int) -> LLMOutputBudgetError:
+    return LLMOutputBudgetError(
+        f"服务端报告输出额度全部用于 reasoning，未产生最终回答（本次实际 max_tokens={max_tokens}）。"
+        "停止用相同额度盲目重试。请核对端点输出上限和代理是否转发 max_tokens，再调整 "
+        "llm.max_tokens / llm.thinking_max_tokens；优化器还需检查 skillbook.optimizer_max_tokens。"
+        "不要超过端点声明上限。OpenAI-compatible 模式下 thinking=false 不保证关闭服务端思考。"
+    )
+
+
 class LLMRequestError(RuntimeError):
     """An API request failed during a response-required learning phase."""
 
@@ -411,11 +427,14 @@ class DeepSeekLLM(BaseLLM):
                 history.append({"attempt": attempt + 1, "ok": True, "latency": round(time.time() - started, 2)})
                 return raw
             entry = {"attempt": attempt + 1, "ok": False, "latency": round(time.time() - started, 2),
-                     "error_chain": _error_chain(last)}
+                     "error_chain": _error_chain(last), "max_tokens": std["max_tokens"]}
             history.append(entry)
             if isinstance(last, LLMHTTPError):
                 e = last
                 entry["http_status"] = e.status
+                if e.status == 502 and "empty reply" in e.body.lower() and "whole output spent on reasoning" in e.body.lower():
+                    entry["failure_kind"] = "reasoning_budget_exhausted"
+                    raise _budget_error(std["max_tokens"]) from e
                 if self._maybe_degrade(e):
                     entry["dropped_parameters"] = sorted(self._dropped)
                     continue
@@ -495,6 +514,8 @@ class DeepSeekLLM(BaseLLM):
                 res.request_failed = True
                 res.error_chain = _error_chain(e)
                 res.error = f"{type(e).__name__}: {e}"[:500]
+                if isinstance(e, LLMOutputBudgetError):
+                    res.truncated = True
                 if isinstance(e, FatalLLMError):
                     fatal = e
             self.usage.add(task, res.usage, cached=False, error=not res.ok, model=res.model)

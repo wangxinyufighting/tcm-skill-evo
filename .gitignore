@@ -12,3 +12,8 @@ review/
 *.sqlite-shm
 data/
 runs/
+reports/
+tests/
+.DS_Store
+*.zip
+phase*.sh

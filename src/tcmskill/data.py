@@ -55,6 +55,10 @@ class Case:
 
 def case_text(case: Case, input_mode: str = "description") -> str:
     """What the agent sees (and what symbolic trigger matching runs on)."""
+    if input_mode == "raw_description":
+        if not case.desc_raw or not case.desc_raw.strip():
+            raise ValueError(f"{case.cid}: raw_description requires desc_raw")
+        return case.desc_raw
     if input_mode == "keywords":
         return "、".join(case.symptoms)
     if input_mode == "both":

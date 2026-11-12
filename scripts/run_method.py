@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--model", default=None, help="= llm.model")
     ap.add_argument("--n_train", type=int, default=2000, help="建库用的训练流长度（0 = 全部训练集）")
     ap.add_argument("--n_test", type=int, default=500, help="测试病例数（0 = 全部；固定随机顺序，所有方法用同一批）")
-    ap.add_argument("--test_split", default="test", choices=["test", "val"])
+    ap.add_argument("--test_split", default="test", choices=["test", "val", "train"], help="train = 练习作答（检索时排除病例自己），供 learn_decision.py 学习")
     ap.add_argument("--order", default=None, choices=["random", "category"], help="= stream.order")
     ap.add_argument("--phase", default="all", choices=["build", "test", "all"])
     ap.add_argument("--run_name", default=None)

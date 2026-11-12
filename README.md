@@ -1,5 +1,9 @@
 # TCM-SkillEvo：从医案中自我进化的中药开方技能记忆
 
+新增实验入口：[`scripts/evolve_knowledge.py`](scripts/evolve_knowledge.py)。使用**原始主治全文、多视角知识检索、药方及生成时依据、多维评分、跨批次经验及独立门控**；支持通过 `--reuse_run` 复用历史候选，旧流程保持不变。当前使用方式见 [v7 多方案对比与技能迭代](docs/knowledge_exploration_v7.md)。
+
+v7 的主线是“多方案 → 评分 → 同病例优劣对比 → 总结/修订技能 → 后续批次继续使用”：工作技能直接进入部分常规探索候选，不等待支持票、配对试用或门控。默认 4 个知识视角中的 syndrome/integrated 使用适用的工作技能，其余保留正式库基线；仍按批次更新。三类库表示成熟程度；配对试用默认关闭，独立门控只负责正式晋升。F1 相同时，已知知识支持指标的明确优势也可产生偏好对。v5 的 [流程](docs/knowledge_evolution.md)、[判断清单](docs/knowledge_judgment_rules.md) 及 [v6 配对试用版](docs/knowledge_cultivation_v6.md) 保留为历史说明。
+
 源源不断地给 agent 喂"主治描述 + 原方"，让它像跟师抄方一样：**先自己开方 → 揭晓原方 → 对照反思 → 攒够一批再归纳成技能**，最后在测试集上用 agent 开的方子与原方比对评估。参考并扩展了 SkeMex（*Experience Makes Skillful*, arXiv 2606.09365）的 Read–Write–Assess–Govern 闭环；LLM 权重不变，只更新技能库。默认骨干：DeepSeek（`deepseek-flash`）。
 
 ```
@@ -235,6 +239,71 @@ python scripts/evaluate.py --compare runs/ours_n2000_random_deepseek-flash runs/
 | 专家盲评                           | `python scripts/export_blind_review.py --runs runs/ours_... runs/case_rag_... --n 100 --dedup_only --out review/blind_100`；技能库评审表见 `analysis/skills_review.csv`     |
 | 教材方剂重发现率                   | 准备 `kb/formulas.csv` 后：`python scripts/analyze_skills.py --run runs/ours_... --formulas kb/formulas.csv`                                                                |
 | 符号执行（不经 LLM 只用技能库）    | `analyze_skills.py` 自动输出 `symbolic_test_*.json`（覆盖率、F1）——说明知识确实沉淀在库里                                                                                 |
+
+### 第 2 阶段：决策层、选方加减、离线技能库（`bash phase2.sh`）
+
+第 1 阶段（val 前 300 例）的结论：全量病例记忆（`case_rag.memory_scope=all_train`）比 500 例记忆高 0.12；
+思考模式贵约 6 倍，只在近重复病例上略好，在去重 / rare 子集上反而略差，所以第 2 阶段全部用非思考模式。
+
+| 组件 | 做什么 | 入口 | 费用 |
+|---|---|---|---|
+| 先例子集 | 评测新增"F1 唯一先例 / F1 无先例"两列：训练集里有描述完全相同且药物完全相同的病例（照抄即可）vs 没有描述相同的病例（真正需要推理） | `evaluate.py`（`--slice 0:300`、`--common`） | 0 |
+| 决策层 | 唯一先例 → 直接照抄；其余病例把 LLM 处方与 kNN 投票融合并校准味数。参数只在验证集上调（默认 5 折交叉拟合），测试集用 `--params` 套用 | `scripts/posthoc.py` | 0 |
+| 选方加减 | `prescribe.style=select_edit`：候选医案编号 C1..Ck（带相似度），模型先选底方再加减，加药须给原文依据；最终处方 = 底方 − remove + add | 预设 `case_select` | ≈ CaseRAG |
+| 离线技能库 | 一次读完整个训练集：方族聚类 → 方证技能（字面触发词、核心药、族内加减）+ 全局"症状→药"加减规则，用与在线流程相同的检验器；可选 LLM 命名 | `scripts/build_skills_offline.py` | 统计 0；命名 ≈ $0.3–1 |
+| 医案 → 方族链接 | `skills.link_cases=true`：给出相似医案时，一并给出这些医案所属方族的技能（医案行注明"属方族：F12"） | 预设 `ours_offline` / `ours_offline_select` | ≈ CaseRAG + 技能 |
+
+离线技能库的统计结果（全训练集）：约 2100 个方族 → 约 970 条方证技能 + 430 条加减规则，用时约 15 秒。单独做符号执行
+（不调 LLM）时 F1 约 0.18，远低于 kNN 的 0.34：核心药是同族方的交集，而且字面触发词只在约 18% 的"本该属于该方族"的病例上触发。
+因此测试时用 `link_cases` 让技能跟着检索到的医案走，而不是只靠触发词。技能能不能在去重、rare、无先例子集上带来增益，
+要看 `ours_offline` 对比 `case_rag` 的配对检验（`phase2.sh` 的 2e）。
+
+### 第 3 阶段：学习式决策层（`bash phase3.sh`）
+
+第 2 阶段（val1000，非思考）：CaseRAG 0.394 → 加决策层 0.435（增益全部来自 211 例唯一先例；704 例无先例几乎不变：0.349 → 0.350）；
+选方加减 0.426（近重复上好得多，去重 / rare 上略差）→ 加决策层 0.434；离线技能 + 医案 0.360（比 CaseRAG 低 0.034）→ 0.424。
+
+`scripts/learn_decision.py` 把"留哪些药"交给一个从反馈中学到的模型：候选药 = 各 LLM run 的药 ∪ 近邻投票的药 ∪ 唯一先例的药（∪ 技能建议的药），
+每味药有检索 / 先例 / 各 LLM run / 技能四组特征，梯度提升（或逻辑回归）预测"是否在原方中"，每例取使期望 F1 最大的前 k 味。三种用法：
+
+| 用法 | 命令要点 | 说明 |
+|---|---|---|
+| val 上交叉拟合 + 消融 | `--runs A B C --skills mem.json` | 报告"不用 LLM / +各 run / +技能特征"，并给出 LLM、技能各自的边际价值（配对检验） |
+| 练习协议 | `--fit_split train --fit_runs P` | 只在训练病例上的练习作答里学，在 val 上评测；`--curve` 给经验曲线 |
+| 不用 LLM 的练习 | `--fit_split train --fit_runs --fit_n 10000` | 零费用的强基线：训练流前 N 例（检索时排除自己）上学 |
+| 测试集 | `--model model.pkl` | 套用保存的模型，测试集上不训练 |
+
+注意：练习病例不能参与构建技能库（`build_skills_offline.py --skip_first N`），herb 频次特征也不做"排除自己"处理——
+两者都会把标签泄漏进特征（脚本会对前者给出警告）。
+
+已知结果（不调 API）：不用 LLM、在 10000 例练习上学到的模型在 val1000 上 F1 0.440（无先例 0.356，rare 0.265），
+高于第 2 阶段最好的 LLM 流程（0.435）；练习 500 例时已有 0.432。
+
+### 第 4 阶段：开方技能进化（`bash phase4.sh`）
+
+目标：让 LLM 随着见到的病例增多，自己总结开方规律、形成技能并持续改进；技能的作用用"同一提示词、有 / 无技能"直接对比。
+设计来自近两年让经验 / 技能真正起作用的工作：Training-Free GRPO（组内语义优势）、ExpeL（成功 / 失败对比）、
+ACE（增量编辑的技能手册）、SkillOpt / GEPA（有界编辑 + 留出集验证）、Trace2Skill（批量归纳）、SkeMex（效用驱动的保留与淘汰）。
+
+一步 = 训练集里的一小批练习病例（检索时排除病例自己）：
+
+1. **组内作答**：a 智能体按当前技能作答（T=0）；b 重新采样（T=0.9）；c 照抄最相似医案 C1；d 多案投票。四种方案都和原方对照打分。
+2. **语义优势**：优化器（默认开思考）比较同一病例中高分和低分的方案，归纳可推广的开方规律，提出至多 `k_edit` 条编辑（新增 / 改写 / 删除）。
+   技能分通用（总在提示词里）和病证专项（病例描述命中关键词时才出现）。
+3. **证据过滤**：每条编辑要在 why 里写“支持 #… ；反例 #…”，支持 ≥ `min_support`（3）个且 ≥ `min_support_ratio`（2）倍反例，否则不检验直接丢弃（只在一两个病例上看到的“规律”多半是过拟合）。交给优化器的病例里，智能体落后的与智能体最好的各占一半（`balanced_reflect`），并附本批与累计练习中各方案按相似度分段的平均表现（`history_table`），避免优化器只看到“照抄 / 投票赢了”的病例而过度推广。
+4. **逐条验证门控**：每条编辑单独检验（`gate_mode: per_edit`），相对当前技能在留出的训练病例（`n_sel` 300）上比较：先在前 `n_screen`（100）个受影响病例上初筛，
+   平均 ΔF1 ≤ 0 直接拒绝；通过的再看全部受影响病例，配对 ΔF1 ≥ `min_delta` 且 t ≥ `t_min`（1.28）才保留。只改病证专项技能时，再从验证池补命中关键词的病例一起判断。
+   被拒绝的编辑（连同各自的 ΔF1）会在后续步骤中提示优化器不要重复。第一版做法（整批检验）保留为 `gate_mode: joint`，用作消融。
+5. **复核**：通过门控的编辑再在另外 `n_confirm`（300）个留出训练病例上复核，平均 ΔF1 ≥ `confirm_delta`（0）才保留。同一批门控病例要检验很多条编辑，总有碰巧通过的（winner's curse）；复核集只用于已通过门控的少数编辑，规则记录的增益取复核值。
+   优化器开思考，输出上限 `optimizer_max_tokens`（32000，思考内容也占额度）；被截断时自动用 1.5 倍再试一次。
+
+智能体的提示词是中性的，不含任何人工策略（何时照抄、开几味、如何取舍）；这些都必须由进化出的技能提供。
+产物：`runs/<run>/skillbook_final.md`（可读的技能文档）、`versions/`（每次被接受的版本）、`evolve_log.jsonl`（每步的对比、编辑和门控结果）。
+消融开关：`skillbook.references=false`（不做组内对比）、`skillbook.gate=false`（不做验证门控）、`skillbook.gate_mode=joint`（整批检验）、`skillbook.min_support=0`（不要求多病例支持）、`skillbook.balanced_reflect=false` + `skillbook.history_table=false`（第二版的病例选择）、`skillbook.n_confirm=0`（不复核）。
+
+并发：`configs/default.yaml` 的 `llm.workers`，或每条命令加 `--set llm.workers=32`。训练时每步的作答只有 16 例，并发超过 16 主要加快门控（≤150 例）和评测（1000 例）；
+每步还有一次串行的优化器调用（开思考），这是每步耗时的下限。请求在客户端重试耗尽后仍失败的病例不会按 F1=0 计分：先整体重跑 `skillbook.retry_passes` 轮，
+仍失败则本步不提交、记入 `evolve_failures.jsonl` 并退出，调低并发或等网络恢复后重跑同一命令续跑。
 
 ## 输出文件（每个 run 目录）
 

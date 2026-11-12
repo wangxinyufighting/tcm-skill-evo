@@ -18,6 +18,11 @@ case_rag:
   description: 相似医案 few-shot（离线 = 全部训练集；在线 = 已见病例）
   prescribe: {style: structured}
 
+case_select:
+  type: case_rag
+  description: 选方加减：从相似医案中选一首底方（C1..Ck，带相似度），再按本例症状加减（加药须给原文依据）
+  prescribe: {style: select_edit}
+
 reflexion:
   type: reflexion
   description: Reflexion 式：逐例反思写成经验，按相似度检索"相似医案 + 经验"
@@ -47,6 +52,17 @@ ours_hybrid:
   type: skills
   description: 本方法 + 相似医案（技能 + 病例 混合）
   skills: {hybrid_cases: 3}
+
+ours_offline:
+  type: skills
+  description: 离线技能库（--load_memory runs/offline_*/memory_final.json）+ 5 个相似医案 + 这些医案所属方族的技能
+  skills: {hybrid_cases: 5, link_cases: true}
+
+ours_offline_select:
+  type: skills
+  description: 同 ours_offline，但用选方加减（底方来自相似医案，技能用于判断证候与加减）
+  prescribe: {style: select_edit}
+  skills: {hybrid_cases: 5, link_cases: true}
 
 # ----------------------------------------------------------------- 消融
 abl_freetext:

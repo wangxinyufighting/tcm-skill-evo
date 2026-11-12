@@ -11,27 +11,27 @@ paths:
 data:
   gt_mode: fmm_alias      # fmm_alias（默认，最干净）| fmm（只修子串伪影）| ptm（PTM 原始集合，便于和文献对比）
   merge_processed: true   # 炮制品并入基原药（炙甘草→甘草、法半夏→半夏 …）
-  input_mode: description # description（清洗后的主治描述，默认）| keywords（PTM 症状关键词）| both
+  input_mode: description # description | raw_description（原文，知识进化强制使用）| keywords | both
   val_size: 1000
   n_categories: 20        # 类别 κ 的个数（KMeans）
   seed: 42
 
 llm:
-  provider: deepseek      # deepseek | openai_compatible | mock（不调 API 的模拟后端，用于冒烟测试与成本估计）
-  model: deepseek/deepseek-v4.1-flash   # 2026-11：deepseek-flash（V4.1-Flash）/ deepseek-v4-pro；deepseek-chat/reasoner 已于 2026-07-24 下线
-  base_url: https://api.commandcode.ai/provider/v1
+  provider: openai_compatible      # deepseek | openai_compatible | mock（不调 API 的模拟后端，用于冒烟测试与成本估计）
+  model: workbuddy-ai/deepseek-v4.1-flash   # 本地 /v1/models 宣告仅 high 思考；最大输出 64000
+  base_url: http://127.0.0.1:3425/v1
   api_key_env: DEEPSEEK_API_KEY
-  thinking: true        # true 开启思考模式（按输出计费，贵很多）
+  thinking: true        # 客户端预算/参数开关；兼容端点不一定允许关闭服务端思考
   reasoning_effort: high  # 思考模式强度 low | high | max
-  thinking_max_tokens: 16000  # 思考模式下的输出上限（思考内容也占输出额度）
+  thinking_max_tokens: 64000  # 含思考与最终回答的总上限，不是额外额度
   temperature: 0.0        # 非思考模式下生效
-  max_tokens: 4096        # 所有方法/任务共用；思考时取 max(本值, thinking_max_tokens)
-  json_mode: true         # response_format = json_object
+  max_tokens: 64000       # Hy4 reasoning 与最终回答共用额度；上限不是固定消耗量
+  json_mode: false        # 先使用端点最小兼容参数；提示词仍要求完整 JSON
   json_repair_retries: 1  # 非完整 JSON / 截断后，最多额外生成一次；沿用同一预算
   accept_repaired_json: false # 不把语法修复的残片作为成功答案或技能写入
-  timeout: 180
-  max_retries: 6
-  workers: 4              # 并发请求数；先确认连接稳定，再逐步提高
+  timeout: 600            # 完整病例实测超过 180 秒；留出长思考时间
+  max_retries: 3
+  workers: 1              # 本地代理先串行验证，再逐步提高并发
   cache_path: runs/llm_cache.sqlite   # 相同请求只付一次钱；重跑 / 断点续跑都走缓存
   log_calls: true
   # 美元 / 百万 token。请以 https://api-docs.deepseek.com/quick_start/pricing 为准（2026-08 起有峰谷价，谷时半价）
@@ -41,11 +41,12 @@ llm:
     default: {hit: 0.03, miss: 0.30, out: 1.20}
 
 prescribe:
-  style: structured       # structured（辨证→治法→处方，带来源标注）| direct（只给药名）
+  style: structured       # structured（辨证→治法→处方，带来源标注）| direct（只给药名）| select_edit（选底方再加减）
   include_vocab: true     # 把药名词表放进 system prompt（静态前缀，命中缓存后几乎免费）
   vocab_min_freq: 1
   max_herbs: 30
   n_cases: 5              # 病例检索类方法每次给几个相似医案
+  select_edit_final: computed   # style=select_edit 时最终处方：computed（底方 − remove + add）| herbs（模型自己列的 herbs）
 
 safety:
   mode: report            # report：只统计违规 | filter：自动删除违规对中排序靠后的药
@@ -65,6 +66,8 @@ skills:
   attempt_first: true     # false = 不先开方、只看 GT 归纳（hindsight-only 消融）
   rules_from_reflection: true   # 把反思里"漏开药 + 提示词"直接做成候选加减规则（零 LLM 成本）
   hybrid_cases: 0         # >0 时在技能之外再给 k 个相似医案（技能 + 病例 混合）
+  link_cases: false       # true：把这些医案所属方族的方证技能（skill.evidence）一并给出，医案行注明"属方族：F12"
+  link_max: 5
   govern_every: 4         # 每隔几个窗口治理一次；0 = 不治理
   merge: true
   split: true
@@ -132,6 +135,63 @@ skills:
     remove_after_windows: 8
     cap: {formula: 600, modification: 1200, principle: 40, free: 800}
 
+skillbook:                # scripts/evolve_skills.py：组内对比 + 验证门控的开方技能进化（LLM 自己总结规律）
+  n_practice: 480         # 练习病例：训练流前 N 例（检索时排除病例自己）
+  batch: 16               # 每步练习病例数
+  epochs: 1
+  n_sel: 300              # 门控用的留出病例：训练流最后 N 例，只用来决定接受 / 拒绝编辑（120 例时 ΔF1 的标准误约 0.017，+0.015 的改进测不出来）
+  k_cases: 5              # 智能体每次看到的相似医案数
+  k_edit: 3               # 每步最多几条编辑（"文本学习率"）
+  n_reflect: 12           # 每步交给优化器的病例数（组内得分差异最大的）
+  min_gap: 0.1            # 组内最高与最低 F1 相差不足此值的病例不参与反思
+  explore_temperature: 0.9  # 方案 b（重新采样）的温度；0 = 不做重新采样
+  optimizer_thinking: true  # 优化器开思考（每步 1 次调用）
+  optimizer_max_tokens: 64000  # 与当前 Hy4 端点最大输出一致，包含思考与最终 JSON
+  gate_mode: per_edit     # per_edit：每条编辑单独检验、单独保留｜joint：一步的编辑整批检验（第一版做法，消融用）
+  min_support: 3          # 每条规则至少引用这么多个支持病例（why 里的 #编号），否则不检验直接丢弃；0 = 不限
+  min_support_ratio: 2    # 且支持病例至少是优化器自己列出的反例的这么多倍；0 = 不看反例
+  balanced_reflect: true  # 交给优化器的病例：智能体落后的与智能体最好的交替各半（false = 第一版，以落后的为主）
+  history_table: true     # 给优化器看累计练习中各方案按相似度分段的平均表现（基础比率）
+  n_screen: 100           # 两阶段门控：先在前 100 个受影响病例上初筛，平均 ΔF1 ≤ screen_delta 直接拒绝，通过的再看全部
+  screen_delta: 0.0
+  min_delta: 0.005        # 门控：受影响的留出病例上平均 ΔF1 至少这么多
+  t_min: 1.28             # 且配对 t 值不低于此值（约单侧 90%）
+  min_affected: 5         # 编辑至少要改变这么多个留出病例的提示词，否则无从判断，拒绝
+  n_confirm: 300          # 复核集：门控通过的编辑再在另外 300 个留出训练病例上复核，平均 ΔF1 ≥ confirm_delta 才保留
+                          # （很多编辑反复在同一批门控病例上检验，总有碰巧通过的；复核抵消这种"侥幸"）；0 = 不复核
+  confirm_delta: 0.0
+  scoped_pool: 30         # 只改了病证专项技能时，再从验证池里补这么多个命中关键词的病例一起判断
+  max_general: 20
+  max_scoped: 80
+  max_rule_chars: 100
+  scoped_per_case: 6
+  max_rejected_shown: 15
+  references: true        # 组内是否加入"照抄 C1""多案投票"两个参照方案（消融：false = 不做组内对比，只看智能体自己的作答与原方）
+  gate: true              # 是否用留出病例验证每次编辑（消融：false = 提出的编辑一律接受）
+  retry_passes: 2         # 请求在客户端重试（llm.max_retries）耗尽后仍失败的病例，再整体重跑几轮；不会按 F1=0 计分
+  retry_wait: 30          # 每轮重跑前等几秒；几轮后仍失败则本步不提交并退出，重跑同一命令续跑
+
+offline:                  # scripts/build_skills_offline.py：从整个训练集一次性归纳技能（统计部分不调 LLM）
+  min_phrase_df: 3        # 症状短语词表：作为完整短语出现在 ≥ 这么多条训练描述里（另加 PTM 症状词表）
+  family_jaccard: 0.5     # 方族聚类：与种子方的药物 Jaccard ≥ 此值
+  family_min_size: 3
+  core_from: frac         # 基础方取法：frac（出现在 ≥ core_frac 同族方中的药）| seed（方族中心那首真实方，去掉族内罕见药）
+  core_frac: 0.5          # 核心药：出现在 ≥ 一半同族方中
+  seed_keep_frac: 0.3     # core_from=seed 时，中心方里出现在 < 30% 同族方中的药不进基础方
+  max_core: 12
+  min_core: 1
+  min_lift: 3.0           # 触发词：在本族中的比例 / 全训练集比例
+  min_prec: 0.35          # 触发词命中的所有训练病例上，核心药的平均覆盖率（= 方证检验的精度）
+  min_cover: 2            # 每个触发词至少覆盖 2 个同族方
+  max_trigger_df: 0       # >0 时，出现病例数超过此值的常见词不作方证触发词（只留给加减规则）；0 = 不限
+  max_triggers: 4         # 多个触发词 = 异病同治
+  pair_triggers: true     # 单个词都不够准时，尝试两词同现
+  rule_min_df: 30         # 全局加减规则：触发词至少出现在这么多病例里
+  rule_min_support: 20
+  rule_min_conf: 0.3
+  rule_min_lift: 2.5
+  rule_max_herbs: 3
+
 case_rag:
   memory_scope: seen      # seen（与本方法相同：只用建库时见过的病例）| all_train（全部训练集，此时用 --phase test 直接测）
 
@@ -140,6 +200,48 @@ baselines_mem:
   expel_max_insights: 40
   expel_k_success: 3
   dc_max_chars: 2500
+
+knowledge:               # scripts/evolve_knowledge.py; legacy commands remain unchanged
+  skill_mode: semantic   # retrieval followed by narrative-only applicability; literal for ablation
+  learning_mode: cultivate  # multi-solution contrasts revise working skills; observe disables exploration
+  exploration_views: [syndrome, integrated]  # a subset of ordinary candidates uses executable working skills
+  hypothesis_trial_budget: 0  # optional extra matched pairs per step, not a learning prerequisite
+  hypothesis_trial_scan_limit: 8  # label-blind draft/case applicability checks per step
+  experience_capacity: 256
+  hypothesis_review_budget: 12  # observe mode only; at most two LLM checks per candidate/case pair
+  pending_gate_budget: 1       # formal promotion only; 0 defers validation without stopping learning
+  skill_retrieval_k: 4
+  skill_retrieval_min_score: 0.02
+  applicability_max_tokens: 0  # definition/applicability/contrast reviews; 0 inherits provider budget including reasoning
+  gate_candidate_limit: 128   # new groups per preflight; deferred scans continue next step without scores
+  replay_runs: []
+  replay_only: false     # require historical episodes; working-skill slots are regenerated, as are optional trials/gates
+  collect_only: false    # accumulate scored episodes without working-skill exploration, optimizer or validation
+  views: [relation, syndrome, case, integrated]
+  variants_per_view: 1
+  variant_band: 4
+  relation_k: 50
+  text_k: 40
+  case_k: 5
+  expand_herbs: 12
+  max_items: 12
+  max_chars: 9000         # serialized evidence characters; raw case text is never truncated
+  excerpt_chars: 450
+  per_herb_cap: 2
+  n_practice: 480         # target; complete description groups are retained
+  batch: 16
+  gate_size: 48           # new, disjoint description groups for EVERY edit
+  confirm_size: 48
+  min_delta: 0.005
+  t_min: 1.28
+  min_support: 3          # maturity only: independent training groups; never required for exploration or revision
+  min_gap: 0.05
+  knowledge_tiebreak: true  # semantic mode: equal F1, comparable knowledge support improves without regressions
+  knowledge_min_gap: 0.05
+  k_edit: 3
+  n_reflect: 6
+  optimizer_max_chars: 120000
+  eval_view: integrated   # one output per case, no gold-aware best-of-N
 
 knn:
   k: 20

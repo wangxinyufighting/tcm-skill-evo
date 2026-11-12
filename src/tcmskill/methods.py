@@ -62,7 +62,8 @@ class BaseMethod:
         nbrs = store.neighbors_by_text(texts, k, exclude=[{c.cid} for c in cases])
         out = []
         for lst in nbrs:
-            out.append([{"text": store.texts[store.pos[cid]], "herbs": self.res.cases[cid].herbs, "extra": extra(cid) if extra else ""} for cid, _ in lst])
+            out.append([{"cid": cid, "sim": round(float(sim), 3), "text": store.texts[store.pos[cid]], "herbs": self.res.cases[cid].herbs,
+                         "extra": extra(cid) if extra else ""} for cid, sim in lst])
         return out
 
 
@@ -276,6 +277,17 @@ class SkillMethod(BaseMethod):
         self.governor = Governor(self.lib, self.store, self.matcher, self.verifier, llm, res, sc, vocab_text)
         self.pending: list[ExperienceRecord] = []
         self._last_ctx: dict[str, list] = {}
+        self._link_cache: tuple = (-1, {})
+
+    def _links(self) -> dict[str, list[str]]:
+        """case id -> formula skills induced from it (skill.evidence); used by skills.link_cases."""
+        if self._link_cache[0] != self.lib.version:
+            m: dict[str, list[str]] = {}
+            for s in self.lib.active("formula"):
+                for cid in s.evidence:
+                    m.setdefault(cid, []).append(s.id)
+            self._link_cache = (self.lib.version, m)
+        return self._link_cache[1]
 
     def contexts(self, cases, frozen):
         texts = [self.res.text(c) for c in cases]
@@ -283,8 +295,20 @@ class SkillMethod(BaseMethod):
         ctxs = [{"skills": [s for s, _, _ in p]} for p in picked]
         k = int(self.sc.hybrid_cases)
         if k > 0:
-            for ctx, cs in zip(ctxs, self._case_ctx(self.store, cases, k)):
+            link = bool(self.sc.get("link_cases", False))
+            links = self._links() if link else {}
+            extra = (lambda cid: ("属方族：" + "、".join(links[cid])) if cid in links else "") if link else None
+            for ctx, cs in zip(ctxs, self._case_ctx(self.store, cases, k, extra)):
                 ctx["cases"] = cs
+                if link:  # the families of the shown cases first, then trigger-matched skills
+                    have = {s.id for s in ctx["skills"]}
+                    linked = []
+                    for c in cs:
+                        for sid in links.get(c["cid"], []):
+                            if sid not in have and self.lib.get(sid) is not None:
+                                have.add(sid)
+                                linked.append(self.lib.get(sid))
+                    ctx["skills"] = linked[: int(self.sc.get("link_max", 5))] + ctx["skills"]
         if not frozen:
             self._last_ctx = {c.cid: ctx["skills"] for c, ctx in zip(cases, ctxs)}
         return ctxs

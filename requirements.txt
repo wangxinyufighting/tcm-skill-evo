@@ -9,3 +9,5 @@ openai>=1.40
 json_repair>=0.25
 # 测试
 pytest>=7
+# 可选：SDPR/CLEPR 基线需要 torch（已安装可跳过）
+# torch>=2.0

@@ -45,7 +45,8 @@ def make_llm(tmp_path, monkeypatch):
         cfg = load_config(os.path.join(ROOT, "configs/default.yaml"), method=method, overrides=[
             "llm.base_url=https://test.invalid/v1", "llm.model=test-model",
             "llm.api_key_env=TCMSKILL_TEST_API_KEY", "llm.thinking=false",
-            "llm.max_tokens=4096", "llm.json_repair_retries=0", "llm.accept_repaired_json=false",
+            "llm.max_tokens=4096", "llm.thinking_max_tokens=16000",
+            "llm.json_repair_retries=0", "llm.accept_repaired_json=false",
             f"llm.cache_path={tmp_path / f'cache-{len(instances)}.sqlite'}", *overrides,
         ])
         llm = ScriptedLLM(cfg)
