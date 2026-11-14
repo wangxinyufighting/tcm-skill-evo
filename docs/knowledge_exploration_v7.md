@@ -2,6 +2,8 @@
 
 本版协议为 `knowledge-evolution-v7`。按批次更新的方式不变，修改的是工作技能的使用路径，以及同 F1 方案的知识偏好。模型参数不更新，旧实验目录不改写。
 
+2026-11-12 的真实 pilot 审核修复见第 10 节。修复改变了实现签名，原 `knowledge_v7_pilot64` 目录不能直接续跑，历史候选可用新目录回放。
+
 ## 1. 主学习循环
 
 ```text
@@ -116,7 +118,7 @@ python scripts/evolve_knowledge.py train \
   --max_steps 4
 ```
 
-同配置改成 `--max_steps 8`，从该 v7 断点继续到总计 8 步。若只想先检验主学习循环，可在新实验启动时设置 `pending_gate_budget=0`，不会阻止探索或修订；中途改配置需另建运行目录。
+仅当源码与实验配置均未改变时，同配置改成 `--max_steps 8` 才能从对应断点继续到总计 8 步。下述审核修复后的运行请使用第 10 节的新目录命令。若只想先检验主学习循环，可在新实验启动时设置 `pending_gate_budget=0`，不会阻止探索或修订；中途改配置需另建运行目录。
 
 ```bash
 python scripts/evolve_knowledge.py diagnose --run_dir runs/knowledge_v7_pilot64
@@ -136,3 +138,119 @@ python scripts/evolve_knowledge.py diagnose --run_dir runs/knowledge_v7_pilot64
 - 产生 39 对同 F1 的知识偏好。第 2 步形成的 1 个待验证技能在第 3、4 步继续用于探索，正式技能仍为 0；这验证学习使用不依赖正式晋升，而不是证明真实技能收益。
 - `runs/knowledge_v7_exploration_mock_eval_20261112` 完成 3 例冻结评测，均未注入工作技能；`diagnose` 读取成功。
 - v5 源运行的 state、protocol、4 个步骤文件及原 v6 mock state 的哈希未改变。未调用真实 LLM API。
+
+## 10. 真实 pilot 的审核修复（2026-11-12）
+
+`knowledge_v7_pilot64` 的 H1/H2/H4/H5 曾因审核器混淆分支条件、动作和医学证据类型而被拦截；H3 在 `tr26485` 上因未给具体年龄、未明确否定排除项而被判未知。修复不删除必要事实、不降低 `min_support`，也不改变批次更新、三库成熟度或独立门控。
+
+### 分支条件与证据类型分开
+
+- 主审核明确 `branch_roles` 只分类 `when`。患者条件后接选药动作仍是 patient；候选药功效比较仍是 procedure，医学主张的来源检查另行执行。
+- 主审核的分支分类与声明不一致且没有其他明确 blocking issue 时，执行一次 `knowledge_branch_conditions` 独立复核。输入只有有争议分支的 index/when，不提供 actions、技能全文、作者声明 kind 或 evidence_type，避免这几项相互干扰。
+- 输出的患者条件片段和方案条件片段必须逐字来自 when。真正的混合条件须给两类不互相包含的片段；分类仍不匹配、仍不确定或响应无效时，技能仍不能执行。
+- 原分类保留在 `reported_branch_roles`，复核输入、引用、请求标识、结果和校验错误保留在 `branch_condition_recheck`。不会把 medical/mixed 主张自动变成 procedural，也不会免除知识来源要求。
+
+### 基础适用范围逐段复核
+
+- 正向必要事实、全覆盖人群措辞、排除情形分别解释。“成人与小儿”不要求具体年龄；“仅小儿”“孕期”等限制仍需病例证据。
+- 只有基础范围 `requirements[0]` 为 unknown、其余 required_conditions 全部 supported、没有明确成立的排除项且原引用校验通过时，才执行一次 `knowledge_scope_review`。其他必要事实缺失、明确矛盾或排除项成立不能借此绕过。
+- 复核将原 applicability 拆为 patient_condition / unrestricted_scope / exclusion / unclear。各片段按顺序拼接必须与原文完全一致，不能漏掉必要条件；患者事实和排除判断必须引用病例原文，全覆盖声明只能引用技能范围自身，不能冒充患者事实。
+- patient_condition 的未知仍阻断；明确排除情形成立仍阻断；未知 exclusion 不要求额外证明不存在。真正“已排除某风险才可使用”的必要否定仍作为 patient_condition，而非普通排除项。
+- 原判断保留在 `reported_requirements`，分段依据保留在 `scope_recheck`。不更改 required_conditions、已知排除项或患者分支激活状态。
+- 两种复核均有缓存，每次审核最多追加一次对应请求；传输失败中止当前步骤而不是记成负例。结构或引用无效不放行。不保证 LLM 从此没有语义误判。
+
+### 修复验证
+
+- 新增 39 项定向回归，全量测试 `341 passed in 86.18s`；Ruff 和 `git diff --check` 通过。
+- 使用当前配置的真实 API，对历史首轮错误判断触发新复核，共 6 次请求。H1/H2/H4/H5 的分支分类误判均得到纠正；H3 在 `tr26485` 上由 uncertain 变为 applicable，原排除项的 unknown 状态未被改成 absent。
+- 第一次范围复核仍错误声称没有病例，并把单独分号当未知项。补充完整原文的输入含义、已有必要条件引用及纯标点处理后再测通过。初次失败与最终结果均保留在 `runs/knowledge_v7_audit_fix_verification_20261112/`，最终汇总为 `final_report.json`。这只是历史错误的定向回归，不是完整重新训练或性能提升证据。
+- 当前源码下的真实 CLI mock 冒烟：`runs/knowledge_v7_auditfix_mock_20261112`，先运行 1 步，再恢复到 2 步，共 16 例。第 2 批有 16 个探索候选、1 个待验证技能；仅证明流程和恢复可运行，不代表真实模型收益。
+- 原 `knowledge_v7_pilot64` 的 state、hypothesis_library、protocol 文件哈希未改变；未运行大规模真实训练或 500 例测试。
+
+### 修复后重跑
+
+不要删除旧目录或手改旧 state。用新运行目录复用 v7 已有的 32 例候选：
+
+```bash
+export DEEPSEEK_API_KEY=magpie
+python scripts/evolve_knowledge.py train \
+  --llm openai_compatible \
+  --run_name knowledge_v7_auditfix64 \
+  --reuse_run "$PWD/runs/knowledge_v7_pilot64" \
+  --set knowledge.n_practice=64 --set knowledge.batch=8 \
+  --set 'knowledge.exploration_views=[syndrome, integrated]' \
+  --set knowledge.hypothesis_trial_budget=0 \
+  --set knowledge.gate_size=4 --set knowledge.confirm_size=4 \
+  --set knowledge.gate_candidate_limit=24 \
+  --set knowledge.min_support=3 --set knowledge.pending_gate_budget=1 \
+  --set knowledge.knowledge_tiebreak=true \
+  --max_steps 8
+```
+
+这是新实验，不是迁移旧断点：复用历史候选及暴露记录，但重新归纳、审核和培养技能，不继承旧技能的审核结论或成熟度成绩。预计处理 64 例练习病例（分组抽样可能略超目标）；门控病例另计。没有在此命令中运行 500 例测试。
+
+## 11. 训练进度显示
+
+训练 CLI 默认向 stderr 显示进度，不需要修改已有训练命令：
+
+- 总进度为已完成批次的病例数及当前批次位置，断点恢复从已有 cursor 开始；失败批次不会提前计入完成数。
+- 生成方案时显示当前生成任务的完成数/总数；回放的历史方案不会冒充新请求，分组生成任务分别计数。
+- 显示知识匹配、方案生成、技能总结、定义审核和验证等阶段。模型请求等待期间持续显示已等待秒数，不虚构请求完成百分比或 ETA。
+- 正常终端原行刷新；日志重定向时使用普通文本，阶段切换立即输出，等待期间约每 10 秒输出一次。最终 JSON 仍单独写 stdout。
+- `--no_progress` 只关闭显示，不改变实验配置或签名；达到 `--max_steps` 但尚未训练完时，不会显示总进度 100%。
+
+进度模块 `knowledge_progress.py` 只在 CLI 端代理请求和观察批次，不修改算法模块、提示、随机数、门控或已保存结果。此次显示修改不要求换 run_name，也不会使此前审核修复后的断点失效；此前审核修复本身的版本限制仍然有效。
+
+实测使用 mock 后端在 `runs/knowledge_v7_progress_smoke_20261112` 先运行 8 例，再恢复到 16 例，终端可见生成任务进度与完成状态；与相同配置的修复后旧 mock 运行相比，protocol_id 和完整 state.json 内容均一致。新增测试覆盖串行/并行请求、等待刷新、失败清理、断点恢复、关闭显示和 stdout JSON 隔离；未为进度测试调用真实 API。
+
+## 12. 冻结工作技能的配对测试
+
+新增独立入口 `scripts/eval_working_skills.py`。它不重新训练、不晋升技能、不修改原运行，且不改变旧 `evolve_knowledge.py eval` 只测正式库的含义。新测试不要求正式技能数量大于零。
+
+### 比较的两组
+
+- `baseline`：原运行的冻结正式技能库。当前 `knowledge_v7_auditfix_n500_seed42` 正式库为空，因此是无技能组，但仍有知识检索和已见训练病例记忆。
+- `working`：同一正式库，按病例原文检索工作技能，按相关性顺序检查适用性，使用第一个适用的版本，最多一个。`replace` 保留原本替换正式技能的语义。每例不生成多个药方再取最高分。
+- 工作版本复用训练时 `working_entries(include_pending=True)` 的筛选：可执行、定义审核通过、未归档、替换目标未失效、应用版本关系；不增加支持数、配对试用或门控通过要求。可执行但门控失败的版本仍按训练策略保留，并单独统计。
+- 检索数量、语义匹配配置、知识视角、模型参数均读取保存配置。当前配置最多检索 4 条，知识视角为 `integrated`。
+- 两组使用相同完整病例原文、同一知识包和同一冻结训练记忆，各输出一个药方及理由。没有适用工作技能、两组提示完全相同时，直接复用基线输出，避免把重复采样波动记作技能收益。
+- 选择和适用性判断不使用测试原方。两组输出都保存后才按原方及知识评分，评分不会回写技能或训练记忆。工作组增加适用性判断调用，因此不是总 API 预算相同的比较。
+
+### 运行
+
+直接对同一固定 `test_order` 的前 500 例配对评测，不要重新执行包含训练的 `train_v1.sh`：
+
+```bash
+export DEEPSEEK_API_KEY=magpie
+DIR="$PWD/runs/knowledge_v7_auditfix_n500_seed42"
+python scripts/eval_working_skills.py \
+  --run_dir "$DIR" \
+  --llm openai_compatible \
+  --split test --n 500 \
+  --out "$DIR/test500_working_paired_v1"
+```
+
+追加 `--prepare_only` 可以只校验训练协议、数据、源码和库，冻结清单，不调用 LLM。去掉它并重复同一命令即可开始。需要 mock 流程检查时使用 `--llm mock --n 4` 和另一个输出目录，不把 mock 数值当模型性能。
+
+默认有评测进度，`--no_progress` 关闭。每例检索/适用性计划先冻结，基线和工作组分别落盘；中断后同命令恢复，已有计划和输出不重新请求。请求重试耗尽时中断，不以 F1=0 代替网络失败；模型成功响应但处方无效仍按原评分逻辑记为失败。相同输出目录不允许混用另一 checkpoint、病例清单、参数或评测代码，不允许并发写入。
+
+### 查看结果
+
+`metrics.json` 中 `complete=true` 才代表全部跑完；中途显示的是已完成前缀：
+
+- `all.baseline.f1`、`all.working.f1`、`all.delta_f1`：全部 500 例的配对比较。
+- `activation_n`、`activation_rate`：实际注入工作技能、提示发生变化的病例数和比例，不是模型自报已遵守技能的比例。
+- `activated.baseline.f1`、`activated.working.f1`、`activated.delta_f1`：同一触发子集两组比较，不能拿它与全体基线直接比较。
+- `gate_failed_activated`：曾门控失败但仍可执行的版本实际触发病例上的配对指标。
+- 同时输出 precision/recall、soft F1、知识支持、引用/原文锚点、有效输出等指标；`known_n` 记录各维度有值的分母，未知不填零。
+
+`protocol.json` 记录固定病例 ID/原文签名、来源 checkpoint、模型、源码和评测策略；`snapshot.json` 保存三库和训练记忆 ID；`cases/` 保存逐例计划、两组输出与评分；`predictions.json` 为完成后的汇总，`usage_sessions/` 保存各次运行的请求消耗。
+
+这项结果应标为“冻结工作技能库的探索性测试”，不是“已验证正式技能的效果”。不能看完测试分数再挑技能、改路由参数或改版本，然后继续把同一测试集作为未使用的最终验证。
+
+### 本次验证（2026-11-13）
+
+- 对真实 500 例训练 checkpoint 只做离线校验：189 条库记录，100 条可执行工作版本，其中 2 条曾门控失败，正式技能 0 条。计划中的 500 个测试 ID 及顺序与 `runs/Deprecated/zeroshot_cot_n2000_random_deepseek/deepseek-v4.1-flash/test_preds.jsonl` 完全一致。
+- 真实 CLI 使用 mock 跑 4 例，验证双组生成、进度、评分及恢复；再次执行同命令新增请求为 0。产物位于 `runs/knowledge_working_eval_verify_20261113/`，mock 分数不代表真实模型性能。
+- 全量测试 `372 passed in 106.51s`，包含 22 项新增工作技能评测测试；Ruff 与 `git diff --check` 通过。原运行的 state、protocol、config 文件 SHA256 不变。
+- 未调用真实 API 执行 500 例测试；上面的命令由使用者启动真实评测。

@@ -52,8 +52,10 @@ history 来自已揭晓的历史训练病例；replay 是历史模型的输出�
 随新病例持续修订、合并相似技能或拆分冲突分支。失败、无变化和负收益也是学习信号，不得仅收集支持或把所有失败排除为“不适用”。
 kind=principle 是跨病证的程序性原则；kind=pattern 是有明确病证边界的规则。
 applicability 只写患者的基础适用范围；当前程序已在选药、比较依据和决定增删，不要要求病例原文证明“正在取舍候选方”。required_conditions 只写必须由病例证实的事实。
+全人群覆盖（如成人与小儿均适用）不是要求病例提供具体年龄；仅成人、孕期等限定仍须有据。出现即禁用的情形统一写 exclude，不在 applicability 中重复混入；明确无某风险才可使用的必要否定仍保留为 required_conditions。
 decision_steps 写待执行的辨证/选药步骤；例如“进一步辨寒热虚实”是步骤，不是要求原文已给完整辨证结论。
 branches 每项包含 kind、when、actions。kind=patient 的 when 必须由病例证实；kind=procedure 只描述组方时对候选药/证据的比较，由执行者在该步骤判断，不能混入未证实的患者事实。
+分支 kind 只由 when 决定，与 actions 是否选药、是否涉及医学知识无关；患者症状条件后接选药动作仍是 patient，候选药功效比较仍是 procedure。
 exclude 写出现即阻止基础技能的情形；未提到不等于已排除。确实需要明确否定的前提仍写入 required_conditions，不能为了通过校验改成可选项。
 text/principle 只写基础技能，不把分支动作重复写成无条件命令；分支条件也不要混入 applicability。不要输出旧的 conditions/actions 字段。
 retrieval_terms 和 scope 只帮助召回，不是逐字 AND/OR 触发器。最终适用性会只依据病例全文逐项判断；不要删除必要条件来扩大覆盖。

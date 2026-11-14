@@ -13,7 +13,10 @@ review/
 data/
 runs/
 reports/
-tests/
+tests/*
+!tests/test_knowledge_audit.py
+!tests/test_knowledge_progress.py
+!tests/test_knowledge_working_eval.py
 .DS_Store
 *.zip
 phase*.sh

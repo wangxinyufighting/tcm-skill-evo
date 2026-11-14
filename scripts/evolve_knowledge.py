@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -13,8 +14,9 @@ from tcmskill.config import apply_override, load_config, to_cfg
 from tcmskill.data import Resources
 from tcmskill.knowledge import KnowledgeRetriever, digest, raw_text
 from tcmskill.knowledge_evolution import (
-    KnowledgeEvolver, atomic_json, dataset_signature, diagnose_knowledge_run, evaluate_knowledge, load_kb, validate_checkpoint, validate_config,
+    atomic_json, dataset_signature, diagnose_knowledge_run, evaluate_knowledge, load_kb, validate_checkpoint, validate_config,
 )
+from tcmskill.knowledge_progress import ProgressKnowledgeEvolver, ProgressLLM, TrainingProgress
 from tcmskill.llm import build_llm
 
 
@@ -37,6 +39,7 @@ def main():
     parser.add_argument("--run_name", default="knowledge_v7")
     parser.add_argument("--run_dir", help="Training run directory; eval loads its saved configuration and memory")
     parser.add_argument("--max_steps", type=int)
+    parser.add_argument("--no_progress", action="store_true", help="Disable training progress on stderr; final JSON remains on stdout")
     parser.add_argument("--reuse_run", action="append", default=[], help="Replay committed practice candidates from a historical run; repeatable")
     parser.add_argument("--replay_only", action="store_true", help="Require historical episodes; exploration slots, optional matched trials and gates still use the current agent")
     parser.add_argument("--collect_only", action="store_true", help="Store contrast experience without draft trials, optimizer or gate calls")
@@ -76,6 +79,11 @@ def main():
     if args.llm:
         cfg.llm.provider = args.llm
     validate_config(cfg)
+    if args.command == "train" and not args.no_progress:
+        try:
+            print("正在加载病例和知识库...", file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            pass
     res = Resources(cfg)
     kb = load_kb(res, cfg)
     if args.command == "inspect":
@@ -95,12 +103,14 @@ def main():
         return
     if args.command == "train":
         run_dir.mkdir(parents=True, exist_ok=True)
-        agent, optimizer = make_llm(cfg, run_dir), make_llm(cfg, run_dir, True)
-        experiment = KnowledgeEvolver(res, cfg, run_dir, agent, optimizer, kb)
-        try:
-            summary = experiment.train(args.max_steps)
-        finally:
-            atomic_json(run_dir / "usage_current_session.json", {"agent": agent.usage.summary(), "optimizer": optimizer.usage.summary()})
+        with TrainingProgress(enabled=not args.no_progress) as progress:
+            agent = ProgressLLM(make_llm(cfg, run_dir), progress)
+            optimizer = ProgressLLM(make_llm(cfg, run_dir, True), progress)
+            experiment = ProgressKnowledgeEvolver(res, cfg, run_dir, agent, optimizer, kb, progress=progress)
+            try:
+                summary = experiment.train(args.max_steps)
+            finally:
+                atomic_json(run_dir / "usage_current_session.json", {"agent": agent.usage.summary(), "optimizer": optimizer.usage.summary()})
         print(json.dumps(summary, ensure_ascii=False))
         return
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))

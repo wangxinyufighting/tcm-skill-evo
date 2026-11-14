@@ -16,7 +16,7 @@ from .utils import estimate_tokens
 
 TYPICAL_OUT = {"prescribe": 380, "reflect": 480, "induce": 950, "split": 700, "expel": 500, "dc": 1500, "annotate": 220, "skill_rx": 160, "skill_opt": 900,
                "knowledge_rx": 800, "knowledge_opt": 1200, "knowledge_applicability": 500, "knowledge_skill_review": 400,
-               "knowledge_skill_support": 500}
+               "knowledge_skill_support": 500, "knowledge_branch_conditions": 300, "knowledge_scope_review": 400}
 
 
 class MockLLM(BaseLLM):
@@ -119,6 +119,16 @@ class MockLLM(BaseLLM):
                                 "reason": "（模拟）未确定"} for i, _ in enumerate(m["exclusions"])],
                 "branches": [{"index": i, "status": "unknown", "quotes": [], "reason": "（模拟）未确定"}
                              for i, _ in enumerate(m.get("branches", []))]}
+
+    @staticmethod
+    def _h_knowledge_branch_conditions(m: dict) -> dict:
+        return {"branch_roles": [{"index": c["index"], "role": "unclear", "patient_quotes": [], "procedure_quotes": [],
+                                  "reason": "（模拟）不能判定条件语义"} for c in m["conditions"]]}
+
+    @staticmethod
+    def _h_knowledge_scope_review(m: dict) -> dict:
+        return {"parts": [{"text": m["applicability"], "kind": "unclear", "status": "unknown", "quotes": [],
+                           "reason": "（模拟）不能用范围复核自动补足未知条件"}]}
 
     @staticmethod
     def _h_knowledge_rx(m: dict) -> dict:
